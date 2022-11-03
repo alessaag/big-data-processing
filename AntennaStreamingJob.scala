@@ -26,15 +26,16 @@ object AntennaStreamingJob extends StreamingJob {
       .option("kafka.bootstrap.servers", kafkaServer)
       .option("subscribe", topic)
       .load()
+
   }
 
-  override def parserJsonData(dataFrame: DataFrame): DataFrame  = {
+  override def parserJsonData(dataFrame: DataFrame): DataFrame = {
     val jsonSchema = StructType(Seq(
       StructField("timestamp", TimestampType, nullable = false),
-      StructField("id", TimestampType, nullable = false),
+      StructField("id", StringType, nullable = false),
       StructField("antenna_id", StringType, nullable = false),
       StructField("bytes", LongType, nullable = false),
-      StructField("app", StringType, nullable = false)
+      StructField("app", StringType, nullable = false),
       )
     )
 
@@ -44,24 +45,9 @@ object AntennaStreamingJob extends StreamingJob {
 
   }
 
-  /*{
-   val jsonSchema = StructType(Seq(
-      StructField("timestamp", TimestampType, nullable = false),
-      StructField("id", StringType, nullable = false),
-      StructField("metric", StringType, nullable = false),
-      StructField("value", IntegerType, nullable = false)
-    )
-    )*/
-/*    val antennaMessageSchema: StructType = ScalaReflection.schemaFor[AntennaMessage].dataType.asInstanceOf[StructType]
+  override def readUserdata(jdbcURI: String, jdbcTable: String, user: String, password: String): DataFrame = {
 
-    dataFrame
-      .select(from_json(col("value").cast(StringType), antennaMessageSchema).as("json"))
-      .select("json.*")
-      .withColumn("timestamp", $"timestamp".cast(TimestampType))
-  }*/
-
-  override def readAntennaMetadata(jdbcURI: String, jdbcTable: String, user: String, password: String): DataFrame = ??? /* {
-   spark
+    spark
       .read
       .format("jdbc")
       .option("url", jdbcURI)
@@ -69,135 +55,103 @@ object AntennaStreamingJob extends StreamingJob {
       .option("user", user)
       .option("password", password)
       .load()
-  }*/
+  }
 
-  override def enrichUserWithMetadata(antennaDF: DataFrame, metadataDF: DataFrame): DataFrame = {
-    antennaDF.as("a")
+  override def enrichUserWithMetadata(userDF: DataFrame, userdataDF: DataFrame): DataFrame = {
+    userDF.as("a")
       .join(
-        metadataDF.as("b"),
+        userdataDF.as("b"),
         $"a.id" === $"b.id"
       )
       .drop($"b.id")
 
   }
 
-  /*{
-    antennaDF.as("antenna")
-      .join(
-        metadataDF.as("metadata"),
-        $"antenna.id" === $"metadata.id"
-      ).drop($"metadata.id")
-  }*/
-
-
-  override def computeBytesCount(dataFrame: DataFrame): Future[Unit]= Future{
+  override def computeBytesCount(dataFrame: DataFrame): DataFrame = {
     dataFrame
-      .filter($"bytes")
-      .select($"antenna_id",$"id", $"app")
-      .withWatermark("timestamp", "1 minute")
-      .groupBy($"antenna_id", window($"timestamp", "5 minutes"))
+      .select($"timestamp", $"antenna_id", $"bytes")
+      .withWatermark("timestamp", "10 seconds")
+      .groupBy($"antenna_id", window($"timestamp", "30 seconds"))
+      .sum("bytes")
 
-  }/* {
-   dataFrame
-      .filter($"metric" === lit("devices_count"))
-      .select($"timestamp", $"location", $"value")
-      .withWatermark("timestamp", "1 minute")
-      .groupBy($"location", window($"timestamp", "5 minutes"))
-      .agg(
-        avg($"value").as("avg_devices_count"),
-        max($"value").as("max_devices_count"),
-        min($"value").as("min_devices_count")
-      )
-      .select($"location", $"window.start".as("date"), $"avg_devices_count", $"max_devices_count", $"min_devices_count")
-      //location TEXT, date TIMESTAMP, avg_devices_count BIGINT, max_devices_count BIGINT, min_devices_count BIGINT
-  }*/
 
-  override def writeToJdbc(dataFrame: DataFrame, jdbcURI: String, jdbcTable: String, user: String, password: String): Future[Unit] = ???/* Future {
-   dataFrame
+  }
+
+
+  override def writeToJdbc(dataFrame: DataFrame, jdbcURI: String, jdbcTable: String, user: String, password: String): Future[Unit] = Future{
+
+    dataFrame
       .writeStream
-      .foreachBatch { (data: DataFrame, batchId: Long) =>
-        data
-          .write
-          .mode(SaveMode.Append)
-          .format("jdbc")
-          .option("driver", "org.postgresql.Driver")
-          .option("url", jdbcURI)
-          .option("dbtable", jdbcTable)
-          .option("user", user)
-          .option("password", password)
-          .save()
+      .foreachBatch {
+        (batch: DataFrame, _: Long) => {
+          batch
+            .write
+            .mode(SaveMode.Append)
+            .format("jdbc")
+            .option("url", jdbcURI)
+            .option("dbtable", jdbcTable)
+            .option("user", user)
+            .option("password", password)
+            .save()
+        }
       }
       .start()
       .awaitTermination()
   }
-*/
 
-  override def writeToStorage(dataFrame: DataFrame, storageRootPath: String): Future[Unit] = ???/*Future {
-    dataFrame
-      .select(
-        $"timestamp", $"id", $"metric", $"value",
-        year($"timestamp").as("year"),
-        month($"timestamp").as("month"),
-        dayofmonth($"timestamp").as("day"),
-        hour($"timestamp").as("hour"),
-      )
-      .writeStream
-      .format("parquet")
-      .option("path", s"$storageRootPath/data")
-      .option("checkpointLocation", s"$storageRootPath/checkpoint")
-      .partitionBy("year", "month", "day", "hour")
-      .start
-      .awaitTermination()
-  }*/
+  override def writeToStorage(dataFrame: DataFrame, storageRootPath: String): Future[Unit] = Future {
+  dataFrame
+    .select(
+      $"timestamp", $"id", $"antenna_id", $"bytes", $"app",
+      year($"timestamp").as("año"),
+      month($"timestamp").as("mes"),
+      dayofmonth($"timestamp").as("dia"),
+      hour($"timestamp").as("hora")
+    )
 
-  /**
-   * Main for Streaming job
-   *
-   * @param args arguments for execution:
-   *             kafkaServer topic jdbcUri jdbcMetadataTable aggJdbcTable jdbcUser jdbcPassword storagePath
-   * Example:
-   *   XXX.XXX.XXX.XXX:9092 antenna_telemetry jdbc:postgresql://XXX.XXX.XXX.XXXX:5432/postgres metadata antenna_agg postgres keepcoding /tmp/batch-storage
-   */
-  // Puedes descomentar este main y llamar con argumentos
-  //def main(args: Array[String]): Unit = run(args)
+    .writeStream
+    .format("parquet")
+    .option("path", s"$storageRootPath/data")
+    .option("checkpointLocation", s"$storageRootPath/checkpoint")
+    .partitionBy("año", "mes", "dia", "hora")
+    .start
+    .awaitTermination()
+  }
 
 
   def main(args: Array[String]): Unit = {
     //run(args)
-    val kafkaDF = readFromKafka("34.125.48.189:9092", "devices")
-    val parseDF = parserJsonData(kafkaDF)
+    val kafkaDF = readFromKafka("34.125.209.162:9092", "devices")
+    val parsedDF = parserJsonData(kafkaDF)
 
-    val metadataDF = readAntennaMetadata(
+    val storageFuture = writeToStorage(parsedDF, "/tmp/antenna_parquet")
+
+    val userDataDF = readUserdata(
       "jdbc:postgresql://34.122.136.252:5432/postgres",
       "user_metadata",
       "postgres",
       "keepcoding"
     )
 
-    val enrichDF = enrichUserWithMetadata(parseDF, metadataDF)
+    val enrichDF = enrichUserWithMetadata(parsedDF, userDataDF)
 
-    enrichDF
-      .writeStream
-      .format("console")
-      .start()
-      .awaitTermination()
+    val countByAntenna = computeBytesCount(enrichDF)
 
-    /*val parsedDF = parserJsonData(kafkaDF)
-    val storageFuture = writeToStorage(parsedDF, "/tmp/antenna_parquet/")
-    val metadaDF = readAntennaMetadata(
-      "jdbc:postgresql://34.173.65.17:5432/postgres",
-      "metadata",
-      "postgres",
-      "keepcoding"
-    )
-    val enrichDF = enrichAntennaWithMetadata(parsedDF, metadaDF)
-    val countByLocation = computeDevicesCountByCoordinates(enrichDF)
-    val jdbcFuture = writeToJdbc(countByLocation, "jdbc:postgresql://34.173.65.17:5432/postgres", "antenna_agg", "postgres", "keepcoding")
+    val jdbcFuture = writeToJdbc(enrichDF, "jdbc:postgresql://34.122.136.252:5432/postgres", "antenna_agg", "postgres", "keepcoding")
+    //antenna_agg es un tabla que contiene los valores agregados calculados: bytes recibidos por antena en una ventana de 5 minutos
 
     Await.result(
       Future.sequence(Seq(storageFuture, jdbcFuture)), Duration.Inf
-    )
-*/
-    //spark.close()
+      )
+
+    spark.close()
+
+    /*countByAntenna
+      .writeStream
+      .format("console")
+      .start()
+      .awaitTermination()*/
+
+
   }
 }
